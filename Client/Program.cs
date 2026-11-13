@@ -129,4 +129,64 @@ internal class Program
             Console.WriteLine("Фоновые запросы остановлены.");
         });
     }
+
+    static void Main(string[] args)
+    {
+        Console.Write("Введите IP адрес сервера (клиент): ");
+        string sIpAdress = Console.ReadLine();
+        Console.Write("Введите порт: ");
+        string sPort = Console.ReadLine();
+
+        if (!int.TryParse(sPort, out Port) || !IPAddress.TryParse(sIpAdress, out IpAdress))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("Некорректный IP или порт.");
+            return;
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("Данные успешно введены. Подключаюсь к серверу.");
+
+        // Получение уникального кода
+        SendCommand("connect");
+
+        if (!IsConnected)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("Не удалось подключиться. Завершение.");
+            Console.Read();
+            return;
+        }
+
+        // Периодические запросы refresh/check
+        StartBackgroundTasks();
+
+        // Управление из консоли
+        while (true)
+        {
+            Console.WriteLine("\nДоступные команды: info | refresh | check | exit");
+            Console.Write("> ");
+            string cmd = Console.ReadLine()?.Trim().ToLower();
+
+            if (cmd == "exit") break;
+
+            if (cmd == "info")
+            {
+                Console.WriteLine($"Дата и время подключения: {ConnectTime:dd.MM.yyyy HH:mm:ss}");
+                Console.WriteLine($"Продолжительность: {(DateTime.Now - ConnectTime).ToString(@"hh\:mm\:ss")}");
+                Console.WriteLine($"IP-адрес клиента: {IpAdress}");
+                Console.WriteLine($"Порт клиента: {Port}");
+                Console.WriteLine($"Уникальный код: {Code}");
+            }
+            else if (cmd == "refresh" || cmd == "check")
+            {
+                SendCommand(cmd);
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("Неизвестная команда. Используйте: info | refresh | check | exit");
+            }
+        }
+    }
 }
