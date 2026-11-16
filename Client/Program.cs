@@ -13,6 +13,7 @@ internal class Program
     public static DateTime ConnectTime;
     public static bool IsConnected = false;
 
+
     // Отправка одной команды серверу и получение ответа
     public static ViewModelMessage SendCommand(string command)
     {

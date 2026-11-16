@@ -148,7 +148,7 @@ namespace Server
                     Console.WriteLine($"Всего клиентов: {ActiveSessions.Count}");
                     Console.ResetColor();
 
-                    ViewModelMessage successMsg = new ViewModelMessage("auth_success", session.UniqueCode);
+                    ViewModelMessage successMsg = new ViewModelMessage("code", session.UniqueCode);
                     SendMessage(handler, successMsg);
 
                     Thread clientThread = new Thread(() => ClientHandler(session));
@@ -200,7 +200,31 @@ namespace Server
                                 ViewModelMessage reply = new ViewModelMessage("pong", "OK");
                                 SendMessage(session.Socket, reply);
                             }
+                            else if (msg.Command == "connect")
+                            {
+                                ViewModelMessage reply = new ViewModelMessage("code", session.UniqueCode);
+                                SendMessage(session.Socket, reply);
+                            }
+                            else if (msg.Command == "refresh")
+                            {
+                                string info = $"{session.ConnectTime:dd.MM.yyyy HH:mm:ss}|" +
+                                              $"{(DateTime.Now - session.ConnectTime).ToString(@"hh\:mm\:ss")}|" +
+                                              $"{session.ClientIp}|{session.ClientPort}|{session.UniqueCode}";
+                                ViewModelMessage reply = new ViewModelMessage("info", info);
+                                SendMessage(session.Socket, reply);
+                            }
+                            else if (msg.Command == "check")
+                            {
+                                if (BlacklistManager.Contains(session.ClientIp.ToString()))
+                                {
+                                    DisconnectClient(session, "Ваш IP-адрес заблокирован администратором.");
+                                    break;
+                                }
+                                ViewModelMessage reply = new ViewModelMessage("info", "OK");
+                                SendMessage(session.Socket, reply);
+                            }
                         }
+
                     }
                     else
                     {
