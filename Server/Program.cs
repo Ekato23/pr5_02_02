@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Common;
-using Newtonsoft.Json; 
+using Newtonsoft.Json;
 
 namespace Server
 {
@@ -85,7 +85,6 @@ namespace Server
         }
 
         // Запуск сервера и прослушивание порта
-
         public static void StartServer()
         {
             IPEndPoint endPoint = new IPEndPoint(IpAddress, Port);
@@ -114,7 +113,17 @@ namespace Server
                     session.LastConfirmationTime = DateTime.Now;
                     session.ClientIp = ((IPEndPoint)handler.RemoteEndPoint).Address;
                     session.ClientPort = ((IPEndPoint)handler.RemoteEndPoint).Port;
+                    if (BlacklistManager.Contains(session.ClientIp.ToString()))
+                    {
+                        ViewModelMessage banMsg = new ViewModelMessage("error", "Доступ запрещён. Ваш IP-адрес находится в чёрном списке.");
+                        SendMessage(handler, banMsg);
+                        handler.Close();
 
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[БЛОК] Отказано в подключении {session.ClientIp} (в чёрном списке).");
+                        Console.ResetColor();
+                        continue;
+                    }
                     lock (_lock)
                     {
                         CleanupSessions();
@@ -250,6 +259,22 @@ namespace Server
             ActiveSessions.RemoveAll(s => (DateTime.Now - s.LastConfirmationTime).TotalMinutes > ConfirmationTimeMinutes + 1);
         }
 
+        private static void KickByIp(string ip)
+        {
+            lock (_lock)
+            {
+                var sessionsToKick = ActiveSessions.Where(s => s.ClientIp.ToString() == ip).ToList();
+                foreach (var s in sessionsToKick)
+                {
+                    DisconnectClient(s, "Ваш IP-адрес заблокирован администратором.");
+                    ActiveSessions.Remove(s);
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[АДМИН] Клиент {ip} (код {s.UniqueCode}) отключен за бан.");
+                    Console.ResetColor();
+                }
+            }
+        }
+
         // Обработчик консольных команд
         private static void ConsoleCommandHandler()
         {
@@ -259,7 +284,9 @@ namespace Server
                 if (string.IsNullOrEmpty(command)) continue;
 
                 string[] parts = command.Split(' ');
-                if (parts[0].ToLower() == "kick" && parts.Length > 1)
+                string cmd = parts[0].ToLower();
+
+                if (cmd == "kick" && parts.Length > 1)
                 {
                     string codeToKick = parts[1];
                     lock (_lock)
@@ -279,7 +306,7 @@ namespace Server
                         }
                     }
                 }
-                else if (parts[0].ToLower() == "list")
+                else if (cmd == "list")
                 {
                     lock (_lock)
                     {
@@ -289,6 +316,50 @@ namespace Server
                             Console.WriteLine($"Код: {s.UniqueCode} | IP: {s.ClientIp} | Время: {s.ConnectTime}");
                         }
                     }
+                }
+                else if (cmd == "ban" && parts.Length > 1)
+                {
+                    string ip = parts[1];
+                    if (BlacklistManager.Add(ip))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[АДМИН] IP {ip} добавлен в чёрный список.");
+                        Console.ResetColor();
+                        KickByIp(ip);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"IP {ip} уже находится в чёрном списке.");
+                    }
+                }
+                else if (cmd == "unban" && parts.Length > 1)
+                {
+                    string ip = parts[1];
+                    if (BlacklistManager.Remove(ip))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"[АДМИН] IP {ip} удалён из чёрного списка.");
+                        Console.ResetColor();
+                    }
+                    else
+                    {
+                        Console.WriteLine($"IP {ip} не найден в чёрном списке.");
+                    }
+                }
+                else if (cmd == "blacklist")
+                {
+                    List<string> banned = BlacklistManager.GetAll();
+                    Console.ForegroundColor = ConsoleColor.DarkYellow;
+                    Console.WriteLine($"\nЧёрный список ({banned.Count}):");
+                    foreach (var ip in banned)
+                    {
+                        Console.WriteLine($" - {ip}");
+                    }
+                    Console.ResetColor();
+                }
+                else
+                {
+                    Console.WriteLine("Доступные команды: list, kick <код>, ban <ip>, unban <ip>, blacklist");
                 }
             }
         }
