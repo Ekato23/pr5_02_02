@@ -13,103 +13,132 @@ internal class Program
     public static DateTime ConnectTime;
     public static bool IsConnected = false;
 
+    // Одно постоянное подключение
+    private static Socket _socket;
+    private static readonly object _sendLock = new object();
 
     // Отправка одной команды серверу и получение ответа
     public static ViewModelMessage SendCommand(string command)
     {
         try
         {
-            IPEndPoint endPoint = new IPEndPoint(IpAdress, Port);
-            using Socket socket = new Socket(
-                AddressFamily.InterNetwork,
-                SocketType.Stream,
-                ProtocolType.Tcp);
-
-            socket.Connect(endPoint);
-
-            if (!socket.Connected)
+            // Подключаемся только один раз
+            if (_socket == null || !_socket.Connected)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Подключение не удалось!");
-                return null;
+                IPEndPoint endPoint = new IPEndPoint(IpAdress, Port);
+                _socket = new Socket(
+                    AddressFamily.InterNetwork,
+                    SocketType.Stream,
+                    ProtocolType.Tcp);
+
+                _socket.ReceiveTimeout = 10000; // не висеть вечно
+                _socket.SendTimeout = 10000;
+
+                _socket.Connect(endPoint);
+
+                if (!_socket.Connected)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Подключение не удалось!");
+                    return null;
+                }
             }
 
-            // Код передаём вторым словом, если он уже есть:
-            // "connect" | "refresh <code>" | "check <code>"
             string message = command;
-            if (!string.IsNullOrEmpty(Code))
+            if (!string.IsNullOrEmpty(Code) && command != "connect")
                 message = command + " " + Code;
 
             ViewModelSend viewModelSend = new ViewModelSend(message, Id);
-
             byte[] messageByte = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(viewModelSend));
-            socket.Send(messageByte);
 
-            byte[] bytes = new byte[10485760];
-            int BytesRec = socket.Receive(bytes);
-            string messageServer = Encoding.UTF8.GetString(bytes, 0, BytesRec);
-            ViewModelMessage viewModelMessage = JsonConvert.DeserializeObject<ViewModelMessage>(messageServer);
-
-            if (viewModelMessage == null)
-                return null;
-
-            // Обработка ответов сервера
-
-            if (viewModelMessage.Command == "code")
+            lock (_sendLock)
             {
-                // Первичное подключение: сервер вернул уникальный код
-                Code = viewModelMessage.Data;
-                ConnectTime = DateTime.Now;
-                IsConnected = true;
+                _socket.Send(messageByte);
 
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("\nПодключение установлено");
-                Console.WriteLine($"Дата и время подключения: {ConnectTime:dd.MM.yyyy HH:mm:ss}");
-                Console.WriteLine($"IP-адрес клиента:          {IpAdress}");
-                Console.WriteLine($"Порт клиента:              {Port}");
-                Console.WriteLine($"Уникальный код:            {Code}");
-            }
-            else if (viewModelMessage.Command == "info")
-            {
-                // Обновление данных о подключении 
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                string[] parts = viewModelMessage.Data.Split('|');
-                if (parts.Length >= 5)
-                {
-                    Console.WriteLine($"[Обновление] Код: {parts[4]} | Время: {parts[0]} | Продолжительность: {parts[1]} | IP: {parts[2]} | Порт: {parts[3]}");
-                }
-                else
-                {
-                    Console.WriteLine($"[Обновление] {viewModelMessage.Data}");
-                }
-            }
-            else if (viewModelMessage.Command == "message")
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"Сервер: {viewModelMessage.Data}");
-
-                if (viewModelMessage.Data.Contains("нехватка мест") ||
-                    viewModelMessage.Data.Contains("клиент отключен"))
+                byte[] bytes = new byte[10485760];
+                int BytesRec = _socket.Receive(bytes);
+                if (BytesRec == 0)
                 {
                     IsConnected = false;
+                    return null;
                 }
-            }
-            else if (viewModelMessage.Command == "error")
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Ошибка: {viewModelMessage.Data}");
-                IsConnected = false;
-            }
+                string messageServer = Encoding.UTF8.GetString(bytes, 0, BytesRec);
+                ViewModelMessage viewModelMessage = JsonConvert.DeserializeObject<ViewModelMessage>(messageServer);
 
-            return viewModelMessage;
+                if (viewModelMessage == null)
+                    return null;
+
+                // Обработка ответов сервера
+
+                if (viewModelMessage.Command == "code")
+                {
+                    // Первичное подключение: сервер вернул уникальный код
+                    Code = viewModelMessage.Data;
+                    ConnectTime = DateTime.Now;
+                    IsConnected = true;
+
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("\nПодключение установлено");
+                    Console.WriteLine($"Дата и время подключения: {ConnectTime:dd.MM.yyyy HH:mm:ss}");
+                    Console.WriteLine($"IP-адрес клиента:          {IpAdress}");
+                    Console.WriteLine($"Порт клиента:              {Port}");
+                    Console.WriteLine($"Уникальный код:            {Code}");
+                }
+                else if (viewModelMessage.Command == "info")
+                {
+                    // Обновление данных о подключении 
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    string[] parts = viewModelMessage.Data.Split('|');
+                    if (parts.Length >= 5)
+                    {
+                        Console.WriteLine($"[Обновление] Код: {parts[4]} | Время: {parts[0]} | Продолжительность: {parts[1]} | IP: {parts[2]} | Порт: {parts[3]}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Обновление] {viewModelMessage.Data}");
+                    }
+                }
+                else if (viewModelMessage.Command == "message")
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Сервер: {viewModelMessage.Data}");
+
+                    if (viewModelMessage.Data.Contains("нехватка мест") ||
+                        viewModelMessage.Data.Contains("клиент отключен"))
+                    {
+                        IsConnected = false;
+                    }
+                }
+                else if (viewModelMessage.Command == "disconnect")
+                {
+                    // Сервер принудительно отключил (таймаут, бан, kick)
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"Сервер: {viewModelMessage.Data}");
+                    IsConnected = false;
+                }
+                else if (viewModelMessage.Command == "pong")
+                {
+                    // Ответ на ping — ничего не делаем
+                }
+                else if (viewModelMessage.Command == "error")
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"Ошибка: {viewModelMessage.Data}");
+                    IsConnected = false;
+                }
+
+                return viewModelMessage;
+            }
         }
         catch (Exception exp)
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine("Что-то случилось: " + exp.Message);
+            IsConnected = false;
             return null;
         }
     }
+
     //Периодически обновляет код и проверяет блокировку
     public static void StartBackgroundTasks()
     {
@@ -190,5 +219,7 @@ internal class Program
                 Console.WriteLine("Неизвестная команда. Используйте: info | refresh | check | exit");
             }
         }
+
+        try { _socket?.Close(); } catch { }
     }
 }
