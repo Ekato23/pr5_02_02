@@ -164,13 +164,14 @@ namespace Server
             }
         }
 
-        //Обработчик конкретного клиента
+        // Обработчик конкретного клиента
         private static void ClientHandler(ClientSession session)
         {
             try
             {
                 while (true)
                 {
+                    // Таймауты
                     if ((DateTime.Now - session.LastConfirmationTime).TotalMinutes > ConfirmationTimeMinutes)
                     {
                         DisconnectClient(session, "Время подтверждения истекло. Требуется переподключение.");
@@ -186,23 +187,45 @@ namespace Server
                     if (session.Socket.Available > 0)
                     {
                         byte[] bytes = new byte[1048576];
-                        int bytesRec = session.Socket.Receive(bytes);
+                        int bytesRec;
+                        try
+                        {
+                            bytesRec = session.Socket.Receive(bytes);
+                        }
+                        catch (SocketException)
+                        {
+                            break;
+                        }
+
+                        if (bytesRec == 0)
+                        {
+                            break;
+                        }
+
                         string data = Encoding.UTF8.GetString(bytes, 0, bytesRec);
 
                         session.LastConfirmationTime = DateTime.Now;
 
-                        ViewModelMessage msg = JsonConvert.DeserializeObject<ViewModelMessage>(data);
+                        ViewModelMessage msg = null;
+                        try
+                        {
+                            msg = JsonConvert.DeserializeObject<ViewModelMessage>(data);
+                        }
+                        catch (JsonException)
+                        {
+                            msg = null;
+                        }
 
                         if (msg != null)
                         {
-                            if (msg.Command == "ping")
+                            if (msg.Command == "check")
                             {
-                                ViewModelMessage reply = new ViewModelMessage("pong", "OK");
-                                SendMessage(session.Socket, reply);
-                            }
-                            else if (msg.Command == "connect")
-                            {
-                                ViewModelMessage reply = new ViewModelMessage("code", session.UniqueCode);
+                                if (BlacklistManager.Contains(session.ClientIp.ToString()))
+                                {
+                                    DisconnectClient(session, "Ваш IP-адрес заблокирован администратором.");
+                                    break;
+                                }
+                                ViewModelMessage reply = new ViewModelMessage("info", "OK");
                                 SendMessage(session.Socket, reply);
                             }
                             else if (msg.Command == "refresh")
@@ -213,26 +236,33 @@ namespace Server
                                 ViewModelMessage reply = new ViewModelMessage("info", info);
                                 SendMessage(session.Socket, reply);
                             }
-                            else if (msg.Command == "check")
+                            else if (msg.Command == "ping")
                             {
-                                if (BlacklistManager.Contains(session.ClientIp.ToString()))
-                                {
-                                    DisconnectClient(session, "Ваш IP-адрес заблокирован администратором.");
-                                    break;
-                                }
-                                ViewModelMessage reply = new ViewModelMessage("info", "OK");
+                                ViewModelMessage reply = new ViewModelMessage("pong", "OK");
+                                SendMessage(session.Socket, reply);
+                            }
+                            else if (msg.Command == "connect")
+                            {
+                                ViewModelMessage reply = new ViewModelMessage("code", session.UniqueCode);
                                 SendMessage(session.Socket, reply);
                             }
                         }
-
                     }
                     else
                     {
-                        if (!session.Socket.Connected)
+                        try
+                        {
+                            if (session.Socket.Poll(1000, SelectMode.SelectRead) && session.Socket.Available == 0)
+                            {
+                                break;
+                            }
+                        }
+                        catch (SocketException)
                         {
                             break;
                         }
-                        Thread.Sleep(100);
+
+                        Thread.Sleep(50);
                     }
                 }
             }
@@ -253,7 +283,7 @@ namespace Server
             }
         }
 
-        //Отправка сообщения клиенту
+        // Отправка сообщения клиенту
         private static void SendMessage(Socket socket, ViewModelMessage msg)
         {
             try
