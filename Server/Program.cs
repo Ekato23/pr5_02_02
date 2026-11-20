@@ -5,7 +5,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using Common;
 using Newtonsoft.Json;
 
@@ -13,7 +12,6 @@ namespace Server
 {
     class Program
     {
-        // Глобальные настройки
         public static IPAddress IpAddress;
         public static int Port;
         public static int MaxLicenses;
@@ -23,10 +21,10 @@ namespace Server
         public static List<ClientSession> ActiveSessions = new List<ClientSession>();
         private static readonly object _lock = new object();
 
-        // Запрос настроек при запуске
         static void Main(string[] args)
         {
-            Console.WriteLine("Настройка сервера");
+            Console.WriteLine("Настройка сервера лицензий");
+
             Console.Write("Введите IP адрес сервера (например, 127.0.0.1): ");
             string sIpAddress = Console.ReadLine();
             while (!IPAddress.TryParse(sIpAddress, out IpAddress))
@@ -84,7 +82,6 @@ namespace Server
             StartServer();
         }
 
-        // Запуск сервера и прослушивание порта
         public static void StartServer()
         {
             IPEndPoint endPoint = new IPEndPoint(IpAddress, Port);
@@ -113,25 +110,20 @@ namespace Server
                     session.LastConfirmationTime = DateTime.Now;
                     session.ClientIp = ((IPEndPoint)handler.RemoteEndPoint).Address;
                     session.ClientPort = ((IPEndPoint)handler.RemoteEndPoint).Port;
+
                     if (BlacklistManager.Contains(session.ClientIp.ToString()))
                     {
-                        ViewModelMessage banMsg = new ViewModelMessage("error", "Доступ запрещён. Ваш IP-адрес находится в чёрном списке.");
-                        SendMessage(handler, banMsg);
+                        SendMessage(handler, new ViewModelMessage("error", "Доступ запрещён. Ваш IP-адрес находится в чёрном списке."));
                         handler.Close();
-
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[БЛОК] Отказано в подключении {session.ClientIp} (в чёрном списке).");
-                        Console.ResetColor();
                         continue;
                     }
+
                     lock (_lock)
                     {
                         CleanupSessions();
-
                         if (ActiveSessions.Count >= MaxLicenses)
                         {
-                            ViewModelMessage errorMsg = new ViewModelMessage("error", "Нет свободных лицензий. Сервер переполнен.");
-                            SendMessage(handler, errorMsg);
+                            SendMessage(handler, new ViewModelMessage("error", "Нет свободных лицензий."));
                             handler.Close();
                             continue;
                         }
@@ -143,13 +135,10 @@ namespace Server
 
                     Console.ForegroundColor = ConsoleColor.Cyan;
                     Console.WriteLine($"\n[ПОДКЛЮЧЕНИЕ] Клиент {session.ClientIp}:{session.ClientPort}");
-                    Console.WriteLine($"Уникальный код: {session.UniqueCode}");
-                    Console.WriteLine($"Дата/Время: {session.ConnectTime}");
-                    Console.WriteLine($"Всего клиентов: {ActiveSessions.Count}");
+                    Console.WriteLine($"Код: {session.UniqueCode}");
                     Console.ResetColor();
 
-                    ViewModelMessage successMsg = new ViewModelMessage("code", session.UniqueCode);
-                    SendMessage(handler, successMsg);
+                    SendMessage(handler, new ViewModelMessage("code", session.UniqueCode));
 
                     Thread clientThread = new Thread(() => ClientHandler(session));
                     clientThread.IsBackground = true;
@@ -159,171 +148,135 @@ namespace Server
             catch (Exception exp)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Что-то случилось: " + exp.Message);
+                Console.WriteLine("Ошибка сервера: " + exp.Message);
                 Console.ResetColor();
             }
         }
 
-        // Обработчик конкретного клиента
         private static void ClientHandler(ClientSession session)
         {
             try
             {
+                session.Socket.ReceiveTimeout = 60000;
+
                 while (true)
                 {
-                    // Таймауты
-                    if ((DateTime.Now - session.LastConfirmationTime).TotalMinutes > ConfirmationTimeMinutes)
-                    {
-                        DisconnectClient(session, "Время подтверждения истекло. Требуется переподключение.");
-                        break;
-                    }
-
                     if ((DateTime.Now - session.ConnectTime).TotalMinutes > DisconnectTimeMinutes)
                     {
-                        DisconnectClient(session, "Время сессии истекло. Требуется обновление кода.");
+                        DisconnectClient(session, "Время сессии истекло.");
                         break;
                     }
 
-                    if (session.Socket.Available > 0)
+                    if ((DateTime.Now - session.LastConfirmationTime).TotalMinutes > ConfirmationTimeMinutes)
                     {
-                        byte[] buffer = new byte[1048576];
-                        int bytesRec;
-                        StringBuilder sb = new StringBuilder();
+                        DisconnectClient(session, "Время подтверждения истекло.");
+                        break;
+                    }
 
-                        try
+                    byte[] lengthBuffer = new byte[4];
+                    int receivedLen = 0;
+                    while (receivedLen < 4)
+                    {
+                        int n = session.Socket.Receive(lengthBuffer, receivedLen, 4 - receivedLen, SocketFlags.None);
+                        if (n == 0) break;
+                        receivedLen += n;
+                    }
+                    if (receivedLen < 4) break;
+
+                    int messageLength = BitConverter.ToInt32(lengthBuffer, 0);
+
+                    byte[] dataBuffer = new byte[messageLength];
+                    int totalReceived = 0;
+                    while (totalReceived < messageLength)
+                    {
+                        int n = session.Socket.Receive(dataBuffer, totalReceived, messageLength - totalReceived, SocketFlags.None);
+                        if (n == 0) break;
+                        totalReceived += n;
+                    }
+                    if (totalReceived < messageLength) break;
+
+                    string data = Encoding.UTF8.GetString(dataBuffer);
+                    session.LastConfirmationTime = DateTime.Now;
+
+                    ViewModelMessage msg = null;
+                    try { msg = JsonConvert.DeserializeObject<ViewModelMessage>(data); }
+                    catch { }
+
+                    if (msg != null && msg.Command != null)
+                    {
+                        string[] parts = msg.Command.Split(' ');
+                        string actualCommand = parts[0].Trim().ToLower();
+                        string clientCode = parts.Length > 1 ? parts[1].Trim() : "";
+
+                        if (!string.IsNullOrEmpty(clientCode) && clientCode != session.UniqueCode)
                         {
-                            do
-                            {
-                                bytesRec = session.Socket.Receive(buffer);
-                                if (bytesRec == 0) break;
-                                sb.Append(Encoding.UTF8.GetString(buffer, 0, bytesRec));
-                            }
-                            while (session.Socket.Available > 0);
-                        }
-                        catch (SocketException)
-                        {
+                            DisconnectClient(session, "Неверный код.");
                             break;
                         }
 
-                        if (sb.Length == 0) break;
-
-                        string data = sb.ToString();
-                        session.LastConfirmationTime = DateTime.Now;
-
-                        ViewModelMessage msg = null;
-                        try
+                        switch (actualCommand)
                         {
-                            msg = JsonConvert.DeserializeObject<ViewModelMessage>(data);
-                        }
-                        catch (JsonException)
-                        {
-                            msg = null;
-                        }
-
-                        if (msg != null && msg.Command != null)
-                        {
-                            string[] parts = msg.Command.Split(' ');
-                            string actualCommand = parts[0].Trim().ToLower();
-
-                            if (parts.Length > 1)
-                            {
-                                string clientCode = parts[1].Trim();
-                                if (clientCode != session.UniqueCode)
-                                {
-                                    DisconnectClient(session, "Неверный уникальный код.");
-                                    break;
-                                }
-                            }
-
-                            if (actualCommand == "check")
-                            {
+                            case "connect":
+                                SendMessage(session.Socket, new ViewModelMessage("code", session.UniqueCode));
+                                break;
+                            case "check":
                                 if (BlacklistManager.Contains(session.ClientIp.ToString()))
                                 {
-                                    DisconnectClient(session, "Ваш IP-адрес заблокирован администратором.");
+                                    DisconnectClient(session, "IP заблокирован.");
                                     break;
                                 }
-                                ViewModelMessage reply = new ViewModelMessage("info", "OK");
-                                SendMessage(session.Socket, reply);
-                            }
-                            else if (actualCommand == "refresh")
-                            {
+                                SendMessage(session.Socket, new ViewModelMessage("info", "OK"));
+                                break;
+                            case "refresh":
                                 string info = $"{session.ConnectTime:dd.MM.yyyy HH:mm:ss}|" +
                                               $"{(DateTime.Now - session.ConnectTime).ToString(@"hh\:mm\:ss")}|" +
                                               $"{session.ClientIp}|{session.ClientPort}|{session.UniqueCode}";
-                                ViewModelMessage reply = new ViewModelMessage("info", info);
-                                SendMessage(session.Socket, reply);
-                            }
-                            else if (actualCommand == "ping")
-                            {
-                                ViewModelMessage reply = new ViewModelMessage("pong", "OK");
-                                SendMessage(session.Socket, reply);
-                            }
-                            else if (actualCommand == "connect")
-                            {
-                                ViewModelMessage reply = new ViewModelMessage("code", session.UniqueCode);
-                                SendMessage(session.Socket, reply);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        try
-                        {
-                            if (session.Socket.Poll(1000, SelectMode.SelectRead) && session.Socket.Available == 0)
-                            {
+                                SendMessage(session.Socket, new ViewModelMessage("info", info));
                                 break;
-                            }
+                            case "ping":
+                                SendMessage(session.Socket, new ViewModelMessage("pong", "OK"));
+                                break;
                         }
-                        catch (SocketException)
-                        {
-                            break;
-                        }
-
-                        Thread.Sleep(50);
                     }
                 }
             }
-            catch (Exception)
-            {
-                // Клиент отключился аварийно
-            }
+            catch (Exception) { }
             finally
             {
-                lock (_lock)
-                {
-                    ActiveSessions.Remove(session);
-                }
+                lock (_lock) { ActiveSessions.Remove(session); }
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine($"[ОТКЛЮЧЕНИЕ] Клиент {session.ClientIp} отключен.");
                 Console.ResetColor();
             }
         }
-      
-        // Отправка сообщения клиенту
         private static void SendMessage(Socket socket, ViewModelMessage msg)
         {
             try
             {
-                string reply = JsonConvert.SerializeObject(msg);
-                byte[] message = Encoding.UTF8.GetBytes(reply);
-                socket.Send(message);
+                string json = JsonConvert.SerializeObject(msg);
+                byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
+
+                byte[] lengthBytes = BitConverter.GetBytes(jsonBytes.Length);
+                byte[] finalPacket = new byte[4 + jsonBytes.Length];
+
+                Buffer.BlockCopy(lengthBytes, 0, finalPacket, 0, 4);
+                Buffer.BlockCopy(jsonBytes, 0, finalPacket, 4, jsonBytes.Length);
+
+                socket.Send(finalPacket);
             }
             catch { }
         }
 
-        // Принудительное отключение клиента
         private static void DisconnectClient(ClientSession session, string reason)
         {
             try
             {
-                ViewModelMessage msg = new ViewModelMessage("disconnect", reason);
-                SendMessage(session.Socket, msg);
+                SendMessage(session.Socket, new ViewModelMessage("disconnect", reason));
                 session.Socket.Close();
             }
             catch { }
         }
 
-        // Очистка мертвых сессий
         private static void CleanupSessions()
         {
             ActiveSessions.RemoveAll(s => (DateTime.Now - s.LastConfirmationTime).TotalMinutes > ConfirmationTimeMinutes + 1);
@@ -336,16 +289,12 @@ namespace Server
                 var sessionsToKick = ActiveSessions.Where(s => s.ClientIp.ToString() == ip).ToList();
                 foreach (var s in sessionsToKick)
                 {
-                    DisconnectClient(s, "Ваш IP-адрес заблокирован администратором.");
+                    DisconnectClient(s, "IP заблокирован администратором.");
                     ActiveSessions.Remove(s);
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"[АДМИН] Клиент {ip} (код {s.UniqueCode}) отключен за бан.");
-                    Console.ResetColor();
                 }
             }
         }
 
-        // Обработчик консольных команд
         private static void ConsoleCommandHandler()
         {
             while (true)
@@ -364,15 +313,11 @@ namespace Server
                         ClientSession sessionToKick = ActiveSessions.FirstOrDefault(s => s.UniqueCode == codeToKick);
                         if (sessionToKick != null)
                         {
-                            DisconnectClient(sessionToKick, "Принудительное отключение администратором.");
+                            DisconnectClient(sessionToKick, "Отключен администратором.");
                             ActiveSessions.Remove(sessionToKick);
                             Console.ForegroundColor = ConsoleColor.Red;
                             Console.WriteLine($"[АДМИН] Клиент {codeToKick} отключен.");
                             Console.ResetColor();
-                        }
-                        else
-                        {
-                            Console.WriteLine("Клиент с таким кодом не найден.");
                         }
                     }
                 }
@@ -383,10 +328,7 @@ namespace Server
                         Console.WriteLine($"\nАктивные клиенты ({ActiveSessions.Count}):");
                         foreach (var s in ActiveSessions)
                         {
-                            TimeSpan duration = DateTime.Now - s.ConnectTime;
-                            string durationStr = duration.ToString(@"hh\:mm\:ss");
-
-                            Console.WriteLine($"Код: {s.UniqueCode} | IP: {s.ClientIp} | Порт: {s.ClientPort} | Время: {s.ConnectTime:dd.MM.yyyy HH:mm:ss} | Продолжительность: {durationStr}");
+                            Console.WriteLine($"Код: {s.UniqueCode} | IP: {s.ClientIp} | Порт: {s.ClientPort} | Время: {s.ConnectTime:HH:mm:ss}");
                         }
                     }
                 }
@@ -400,10 +342,6 @@ namespace Server
                         Console.ResetColor();
                         KickByIp(ip);
                     }
-                    else
-                    {
-                        Console.WriteLine($"IP {ip} уже находится в чёрном списке.");
-                    }
                 }
                 else if (cmd == "unban" && parts.Length > 1)
                 {
@@ -414,25 +352,12 @@ namespace Server
                         Console.WriteLine($"[АДМИН] IP {ip} удалён из чёрного списка.");
                         Console.ResetColor();
                     }
-                    else
-                    {
-                        Console.WriteLine($"IP {ip} не найден в чёрном списке.");
-                    }
                 }
                 else if (cmd == "blacklist")
                 {
                     List<string> banned = BlacklistManager.GetAll();
-                    Console.ForegroundColor = ConsoleColor.DarkYellow;
                     Console.WriteLine($"\nЧёрный список ({banned.Count}):");
-                    foreach (var ip in banned)
-                    {
-                        Console.WriteLine($" - {ip}");
-                    }
-                    Console.ResetColor();
-                }
-                else
-                {
-                    Console.WriteLine("Доступные команды: list, kick <код>, ban <ip>, unban <ip>, blacklist");
+                    foreach (var ip in banned) Console.WriteLine($" - {ip}");
                 }
             }
         }
