@@ -383,7 +383,10 @@ namespace Server
                         Console.WriteLine($"\nАктивные клиенты ({ActiveSessions.Count}):");
                         foreach (var s in ActiveSessions)
                         {
-                            Console.WriteLine($"Код: {s.UniqueCode} | IP: {s.ClientIp} | Время: {s.ConnectTime}");
+                            TimeSpan duration = DateTime.Now - s.ConnectTime;
+                            string durationStr = duration.ToString(@"hh\:mm\:ss");
+
+                            Console.WriteLine($"Код: {s.UniqueCode} | IP: {s.ClientIp} | Порт: {s.ClientPort} | Время: {s.ConnectTime:dd.MM.yyyy HH:mm:ss} | Продолжительность: {durationStr}");
                         }
                     }
                 }
