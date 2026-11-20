@@ -186,24 +186,28 @@ namespace Server
 
                     if (session.Socket.Available > 0)
                     {
-                        byte[] bytes = new byte[1048576];
+                        byte[] buffer = new byte[1048576];
                         int bytesRec;
+                        StringBuilder sb = new StringBuilder();
+
                         try
                         {
-                            bytesRec = session.Socket.Receive(bytes);
+                            do
+                            {
+                                bytesRec = session.Socket.Receive(buffer);
+                                if (bytesRec == 0) break;
+                                sb.Append(Encoding.UTF8.GetString(buffer, 0, bytesRec));
+                            }
+                            while (session.Socket.Available > 0);
                         }
                         catch (SocketException)
                         {
                             break;
                         }
 
-                        if (bytesRec == 0)
-                        {
-                            break;
-                        }
+                        if (sb.Length == 0) break;
 
-                        string data = Encoding.UTF8.GetString(bytes, 0, bytesRec);
-
+                        string data = sb.ToString();
                         session.LastConfirmationTime = DateTime.Now;
 
                         ViewModelMessage msg = null;
@@ -216,9 +220,22 @@ namespace Server
                             msg = null;
                         }
 
-                        if (msg != null)
+                        if (msg != null && msg.Command != null)
                         {
-                            if (msg.Command == "check")
+                            string[] parts = msg.Command.Split(' ');
+                            string actualCommand = parts[0].Trim().ToLower();
+
+                            if (parts.Length > 1)
+                            {
+                                string clientCode = parts[1].Trim();
+                                if (clientCode != session.UniqueCode)
+                                {
+                                    DisconnectClient(session, "Неверный уникальный код.");
+                                    break;
+                                }
+                            }
+
+                            if (actualCommand == "check")
                             {
                                 if (BlacklistManager.Contains(session.ClientIp.ToString()))
                                 {
@@ -228,7 +245,7 @@ namespace Server
                                 ViewModelMessage reply = new ViewModelMessage("info", "OK");
                                 SendMessage(session.Socket, reply);
                             }
-                            else if (msg.Command == "refresh")
+                            else if (actualCommand == "refresh")
                             {
                                 string info = $"{session.ConnectTime:dd.MM.yyyy HH:mm:ss}|" +
                                               $"{(DateTime.Now - session.ConnectTime).ToString(@"hh\:mm\:ss")}|" +
@@ -236,12 +253,12 @@ namespace Server
                                 ViewModelMessage reply = new ViewModelMessage("info", info);
                                 SendMessage(session.Socket, reply);
                             }
-                            else if (msg.Command == "ping")
+                            else if (actualCommand == "ping")
                             {
                                 ViewModelMessage reply = new ViewModelMessage("pong", "OK");
                                 SendMessage(session.Socket, reply);
                             }
-                            else if (msg.Command == "connect")
+                            else if (actualCommand == "connect")
                             {
                                 ViewModelMessage reply = new ViewModelMessage("code", session.UniqueCode);
                                 SendMessage(session.Socket, reply);
@@ -272,7 +289,6 @@ namespace Server
             }
             finally
             {
-                // Удаляем сессию из списка при выходе
                 lock (_lock)
                 {
                     ActiveSessions.Remove(session);
@@ -282,7 +298,7 @@ namespace Server
                 Console.ResetColor();
             }
         }
-
+      
         // Отправка сообщения клиенту
         private static void SendMessage(Socket socket, ViewModelMessage msg)
         {
